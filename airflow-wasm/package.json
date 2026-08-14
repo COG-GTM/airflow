@@ -1,0 +1,23 @@
+{
+  "name": "airflow-wasm",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Apache Airflow running entirely in the browser on Pyodide and PGlite",
+  "scripts": {
+    "postinstall": "node scripts/copy-pyodide.mjs",
+    "assets": "node scripts/copy-pyodide.mjs && node scripts/build-wheels.mjs",
+    "dev": "npm run assets && vite",
+    "build": "npm run assets && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.4",
+    "pyodide": "314.0.3"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vite": "8.1.5"
+  }
+}
