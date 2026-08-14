@@ -95,6 +95,9 @@ installed; the script only needs an interpreter that can `import airflow`.
   sequences, `information_schema`, `pg_stat_activity` — the scheduler's locking
   primitives are all present in PGlite 0.5.4 (Postgres 18.3)
 - `example_bash_operator` runs to `success` with all task state persisted in PGlite
+- In the UI: login, the Dags list, and a Dag run's detail page (state, duration)
+
+The UI is only partly usable — see limitation 6.
 
 ## Limitations
 
@@ -131,8 +134,18 @@ bounds queued clients, not parallelism). Consequences:
    This is fine for a single scheduler and unsafe for HA setups.
 4. **Session state is shared.** `SET`s, temp tables and prepared statements issued by
    one client connection are visible to all of them.
-5. **A wedged gateway needs a restart.** Once the single backend is stuck in an
-   abandoned transaction, all clients hang; `pglite_gateway.py stop`/`start` recovers
-   (uncommitted work is lost).
-6. **Do not run tasks while the api-server is down.** Unrelated to PGlite, but easy to
+5. **A wedged gateway needs a restart, Airflow first.** Once the single backend is stuck
+   in an abandoned transaction, all clients hang. Recover with `airflow_pglite.py stop`,
+   then `pglite_gateway.py stop`/`start`, then `airflow_pglite.py start` — restarting only
+   the gateway does not help, because Airflow's pooled connections re-wedge it
+   immediately. Committed data survives; uncommitted work is lost.
+6. **Parts of the UI never load.** The Dag detail page and a run's task-instance table
+   issue several API requests in parallel; with a pool of one they queue behind each other
+   until SQLAlchemy's pool timeout and return `500 QueuePool … connection timed out`, so
+   those views sit on skeleton placeholders indefinitely. Widening the pool to 10/10 was
+   measured to be *worse*: the extra connections sit idle-in-transaction and wedge the
+   gateway (limitation 5). Use the CLI or `psql` for per-task state. Triggering a Dag from
+   the UI is affected too, since the Trigger button lives on that page — use
+   `airflow dags trigger`.
+7. **Do not run tasks while the api-server is down.** Unrelated to PGlite, but easy to
    hit here: tasks talk to the Execution API, so they fail if the api-server is not up.

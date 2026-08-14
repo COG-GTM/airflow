@@ -49,7 +49,9 @@ ENVIRONMENT = {
     "AIRFLOW_HOME": str(AIRFLOW_HOME),
     "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN": f"postgresql+psycopg2://postgres:postgres@{HOST}:{PORT}/postgres",
     # PGlite runs one statement at a time, so extra pooled connections only add
-    # transactions competing for the single backend.
+    # transactions competing for the single backend. Widening the pool to 10/10 was
+    # measured to be worse: more connections sitting idle-in-transaction starve the
+    # backend and wedge the gateway outright.
     "AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE": "1",
     "AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW": "1",
     "AIRFLOW__CORE__EXECUTOR": "LocalExecutor",
