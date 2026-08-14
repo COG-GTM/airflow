@@ -81,7 +81,14 @@ function connectServiceWorker(target: ServiceWorker): void {
 }
 
 async function registerServiceWorker(): Promise<ServiceWorkerRegistration> {
-  const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+  let registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+  // A registration can be left behind with no worker in any state (an interrupted unregister, a
+  // killed update).  Registering again does not revive it and `ready` would never settle, so throw
+  // it away and start over rather than hanging on the first boot step forever.
+  if (!(registration.active || registration.installing || registration.waiting)) {
+    await registration.unregister();
+    registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+  }
   await navigator.serviceWorker.ready;
   navigator.serviceWorker.addEventListener("message", (event) => {
     if (event.data?.type === "need-port" && navigator.serviceWorker.controller) {
@@ -112,8 +119,8 @@ function startScheduler(): void {
 
 async function main(): Promise<void> {
   document.querySelector<HTMLButtonElement>("#reset")!.addEventListener("click", async () => {
-    const registration = await navigator.serviceWorker.getRegistration("/");
-    await registration?.unregister();
+    // The service worker holds no state worth clearing, and unregistering it here used to race the
+    // reload badly enough to leave the origin with a dead registration -- only the database goes.
     const root = await navigator.storage.getDirectory();
     await root.removeEntry("airflow-wasm", { recursive: true }).catch(() => undefined);
     location.reload();
