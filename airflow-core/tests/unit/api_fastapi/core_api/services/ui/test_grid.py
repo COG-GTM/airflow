@@ -164,7 +164,7 @@ def _make_plan_test_serdag():
     return create_scheduler_dag(dag)
 
 
-def _ti_summary(state, start_minute, end_minute, version=1):
+def _make_ti_summary(state, start_minute, end_minute, version=1):
     summary = GridNodeAgg()
     summary.add_ti(
         state=state,
@@ -201,11 +201,11 @@ def test_aggregate_grid_node_plan_reuses_plan_across_runs():
     plan = _build_grid_node_plan(serdag.task_group)
     run_ti_details = [
         {
-            "start": _ti_summary(TaskInstanceState.SUCCESS, 0, 1),
-            "outer.inner.a": _ti_summary(TaskInstanceState.FAILED, 1, 3),
-            "outer.b": _ti_summary(TaskInstanceState.UPSTREAM_FAILED, 4, 5, version=2),
+            "start": _make_ti_summary(TaskInstanceState.SUCCESS, 0, 1),
+            "outer.inner.a": _make_ti_summary(TaskInstanceState.FAILED, 1, 3),
+            "outer.b": _make_ti_summary(TaskInstanceState.UPSTREAM_FAILED, 4, 5, version=2),
         },
-        {"start": _ti_summary(TaskInstanceState.RUNNING, 0, 2)},
+        {"start": _make_ti_summary(TaskInstanceState.RUNNING, 0, 2)},
     ]
 
     for ti_details in run_ti_details:

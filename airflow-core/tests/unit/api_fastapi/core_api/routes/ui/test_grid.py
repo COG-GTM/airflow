@@ -1291,7 +1291,8 @@ class TestGetGridDataEndpoint:
     )
     @mock.patch(
         "airflow.api_fastapi.core_api.routes.ui.grid._build_grid_node_plan",
-        wraps=_build_grid_node_plan,
+        autospec=True,
+        side_effect=_build_grid_node_plan,
     )
     def test_grid_ti_summaries_stream_builds_node_plan_once_per_dag_version(
         self, mock_build_plan, session, test_client, dag_id, run_ids, expected_plan_builds
