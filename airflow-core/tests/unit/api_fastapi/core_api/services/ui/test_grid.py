@@ -17,7 +17,22 @@
 
 from __future__ import annotations
 
-from airflow.api_fastapi.core_api.services.ui.grid import _merge_node_dicts
+import datetime
+
+from airflow.api_fastapi.core_api.services.ui.grid import (
+    GridNodeAgg,
+    _aggregate_grid_node_plan,
+    _build_grid_node_plan,
+    _find_aggregates,
+    _merge_node_dicts,
+)
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk import DAG
+from airflow.sdk.definitions.taskgroup import TaskGroup
+from airflow.utils.state import TaskInstanceState
+
+from tests_common.test_utils.dag import create_scheduler_dag
+from tests_common.test_utils.mock_operators import MockOperator
 
 
 def test_merge_node_dicts_with_none_new_list():
@@ -136,3 +151,74 @@ def test_merge_node_dicts_large_merge_keeps_unique_nodes():
         "group_399.old_task",
         "group_399.new_task",
     }
+
+
+def _make_plan_test_serdag():
+    with DAG("plan_dag", schedule=None, start_date=datetime.datetime(2025, 1, 1)) as dag:
+        start = EmptyOperator(task_id="start")
+        with TaskGroup("outer") as outer:
+            with TaskGroup("inner") as inner:
+                EmptyOperator(task_id="a") >> MockOperator.partial(task_id="mapped").expand(arg1=["x", "y"])
+            inner >> EmptyOperator(task_id="b")
+        start >> outer
+    return create_scheduler_dag(dag)
+
+
+def _ti_summary(state, start_minute, end_minute, version=1):
+    summary = GridNodeAgg()
+    summary.add_ti(
+        state=state,
+        start_date=datetime.datetime(2025, 1, 1, 0, start_minute, tzinfo=datetime.timezone.utc),
+        end_date=datetime.datetime(2025, 1, 1, 0, end_minute, tzinfo=datetime.timezone.utc),
+        dag_version_number=version,
+    )
+    return summary
+
+
+def test_build_grid_node_plan_flattens_task_group_tree_in_post_order():
+    root = _make_plan_test_serdag().task_group
+    plan = _build_grid_node_plan(root)
+
+    assert [(entry.node_id, entry.type, entry.parent_id) for entry in plan] == [
+        ("start", "task", root.node_id),
+        ("outer.inner.a", "task", "outer.inner"),
+        ("outer.inner.mapped", "mapped_task", "outer.inner"),
+        ("outer.inner", "group", "outer"),
+        ("outer.b", "task", "outer"),
+        ("outer", "group", root.node_id),
+    ]
+    by_id = {entry.node_id: entry for entry in plan}
+    assert [plan[i].node_id for i in by_id["outer.inner"].merge_indices] == [
+        "outer.inner.a",
+        "outer.inner.mapped",
+    ]
+    assert [plan[i].node_id for i in by_id["outer"].merge_indices] == ["outer.inner", "outer.b"]
+    assert by_id["start"].merge_indices == ()
+
+
+def test_aggregate_grid_node_plan_reuses_plan_across_runs():
+    serdag = _make_plan_test_serdag()
+    plan = _build_grid_node_plan(serdag.task_group)
+    run_ti_details = [
+        {
+            "start": _ti_summary(TaskInstanceState.SUCCESS, 0, 1),
+            "outer.inner.a": _ti_summary(TaskInstanceState.FAILED, 1, 3),
+            "outer.b": _ti_summary(TaskInstanceState.UPSTREAM_FAILED, 4, 5, version=2),
+        },
+        {"start": _ti_summary(TaskInstanceState.RUNNING, 0, 2)},
+    ]
+
+    for ti_details in run_ti_details:
+        expected = list(_find_aggregates(serdag.task_group, None, ti_details))
+        assert list(_aggregate_grid_node_plan(plan, ti_details)) == expected
+
+    first_run = {node["task_id"]: node for node, _ in _aggregate_grid_node_plan(plan, run_ti_details[0])}
+    assert first_run["outer.inner.mapped"]["child_states"] == {"none": 1}
+    assert first_run["outer.inner"]["child_states"] == {"failed": 1, "none": 1}
+    assert first_run["outer"]["child_states"] == {"failed": 1, "none": 1, "upstream_failed": 1}
+    assert first_run["outer"]["dag_version_number"] == 2
+    assert "outer.inner" not in run_ti_details[0]
+
+    second_run = {node["task_id"]: node for node, _ in _aggregate_grid_node_plan(plan, run_ti_details[1])}
+    assert second_run["outer"]["child_states"] == {"none": 1}
+    assert second_run["start"]["state"] == TaskInstanceState.RUNNING

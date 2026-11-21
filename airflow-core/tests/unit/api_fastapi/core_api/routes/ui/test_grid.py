@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from operator import attrgetter
+from unittest import mock
 
 import pendulum
 import pytest
@@ -27,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from airflow._shared.timezones import timezone
+from airflow.api_fastapi.core_api.services.ui.grid import _build_grid_node_plan
 from airflow.models.dag import DagModel
 from airflow.models.dag_version import DagVersion
 from airflow.models.dagbag import DBDagBag
@@ -1279,3 +1281,25 @@ class TestGetGridDataEndpoint:
             response = test_client.get(f"/grid/ti_summaries/{DAG_ID}", params={"run_ids": run_ids})
         assert response.status_code == 200
         assert len(self._parse_ndjson(response)) == len(run_ids)
+
+    @pytest.mark.parametrize(
+        ("dag_id", "run_ids", "expected_plan_builds"),
+        [
+            pytest.param(DAG_ID, ["run_1", "run_2"], 1, id="runs-share-dag-version"),
+            pytest.param(DAG_ID_5, ["run_5_1", "run_5_2"], 2, id="one-plan-per-dag-version"),
+        ],
+    )
+    @mock.patch(
+        "airflow.api_fastapi.core_api.routes.ui.grid._build_grid_node_plan",
+        wraps=_build_grid_node_plan,
+    )
+    def test_grid_ti_summaries_stream_builds_node_plan_once_per_dag_version(
+        self, mock_build_plan, session, test_client, dag_id, run_ids, expected_plan_builds
+    ):
+        session.commit()
+
+        response = test_client.get(f"/grid/ti_summaries/{dag_id}", params={"run_ids": run_ids})
+
+        assert response.status_code == 200
+        assert [summary["run_id"] for summary in self._parse_ndjson(response)] == run_ids
+        assert mock_build_plan.call_count == expected_plan_builds

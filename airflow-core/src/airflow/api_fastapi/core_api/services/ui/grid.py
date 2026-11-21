@@ -141,6 +141,86 @@ def _get_aggs_for_node(summary: GridNodeAgg) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class GridNodePlanEntry:
+    """One grid node in the order ``_find_aggregates`` yields it, independent of any Dag run's TIs."""
+
+    node_id: str
+    task_display_name: str
+    type: str
+    parent_id: str | None
+    merge_indices: tuple[int, ...] = ()
+
+
+def _build_grid_node_plan(
+    node: SerializedTaskGroup | SerializedBaseOperator | TaskMap,
+    parent_node: SerializedTaskGroup | SerializedBaseOperator | TaskMap | None = None,
+    group_dict: dict[str | None, SerializedTaskGroup] | None = None,
+) -> list[GridNodePlanEntry]:
+    """
+    Flatten the task group tree into the post-order list of grid nodes.
+
+    The plan depends only on the serialized Dag, so it can be built once and reused to
+    aggregate the TIs of every Dag run of the same Dag version.
+    """
+    plan: list[GridNodePlanEntry] = []
+
+    def visit(node, parent_node, group_dict) -> list[int]:
+        node_id = node.node_id
+        parent_id = parent_node.node_id if parent_node else None
+        if isinstance(node, SerializedMappedOperator):
+            plan.append(GridNodePlanEntry(node_id, node.task_display_name, "mapped_task", parent_id))
+            return [len(plan) - 1]
+        if isinstance(node, SerializedTaskGroup):
+            if group_dict is None:
+                group_dict = node.dag.task_group.get_task_group_dict()
+            visited: list[int] = []
+            for child in get_task_group_children_getter()(node, group_dict):
+                visited.extend(visit(child, node, group_dict))
+            if not node_id:
+                return visited
+            merge_indices = tuple(i for i in visited if plan[i].parent_id == node_id)
+            plan.append(GridNodePlanEntry(node_id, node_id, "group", parent_id, merge_indices))
+            return [*visited, len(plan) - 1]
+        if isinstance(node, SerializedBaseOperator):
+            plan.append(GridNodePlanEntry(node_id, node.task_display_name, "task", parent_id))
+            return [len(plan) - 1]
+        return []
+
+    visit(node, parent_node, group_dict)
+    return plan
+
+
+def _aggregate_grid_node_plan(
+    plan: Iterable[GridNodePlanEntry],
+    ti_details: Mapping[str, GridNodeAgg],
+) -> Iterable[tuple[dict[str, Any], GridNodeAgg]]:
+    """Aggregate one Dag run's TI summaries over a plan built by ``_build_grid_node_plan``."""
+    summaries: list[GridNodeAgg] = []
+    for entry in plan:
+        if entry.type == "group":
+            summary = GridNodeAgg()
+            for index in entry.merge_indices:
+                summary.merge(summaries[index])
+        else:
+            # Do not mutate ti_details by accidental key creation
+            found = ti_details.get(entry.node_id)
+            summary = GridNodeAgg() if found is None else found
+            if entry.type == "mapped_task":
+                summary = summary.with_placeholder_state()
+        summaries.append(summary)
+        yield (
+            {
+                "task_id": entry.node_id,
+                "task_display_name": entry.task_display_name,
+                "type": entry.type,
+                "parent_id": entry.parent_id,
+                **_get_aggs_for_node(summary),
+            },
+            summary,
+        )
+
+
 def _find_aggregates(
     node: SerializedTaskGroup | SerializedBaseOperator | TaskMap,
     parent_node: SerializedTaskGroup | SerializedBaseOperator | TaskMap | None,
@@ -148,61 +228,4 @@ def _find_aggregates(
     group_dict: dict[str | None, SerializedTaskGroup] | None = None,
 ) -> Iterable[tuple[dict[str, Any], GridNodeAgg]]:
     """Recursively fill the Task Group Map."""
-    node_id = node.node_id
-    parent_id = parent_node.node_id if parent_node else None
-    # Do not mutate ti_details by accidental key creation
-    summary = ti_details.get(node_id)
-    if summary is None:
-        summary = GridNodeAgg()
-
-    if node is None:
-        return
-    if isinstance(node, SerializedMappedOperator):
-        mapped_summary = summary.with_placeholder_state()
-        yield (
-            {
-                "task_id": node_id,
-                "task_display_name": node.task_display_name,
-                "type": "mapped_task",
-                "parent_id": parent_id,
-                **_get_aggs_for_node(mapped_summary),
-            },
-            mapped_summary,
-        )
-
-        return
-    if isinstance(node, SerializedTaskGroup):
-        if group_dict is None:
-            group_dict = node.dag.task_group.get_task_group_dict()
-        children_summary = GridNodeAgg()
-        for child in get_task_group_children_getter()(node, group_dict):
-            for child_node, child_summary in _find_aggregates(
-                node=child, parent_node=node, ti_details=ti_details, group_dict=group_dict
-            ):
-                if child_node["parent_id"] == node_id:
-                    children_summary.merge(child_summary)
-                yield child_node, child_summary
-        if node_id:
-            yield (
-                {
-                    "task_id": node_id,
-                    "task_display_name": node_id,
-                    "type": "group",
-                    "parent_id": parent_id,
-                    **_get_aggs_for_node(children_summary),
-                },
-                children_summary,
-            )
-        return
-    if isinstance(node, SerializedBaseOperator):
-        yield (
-            {
-                "task_id": node_id,
-                "task_display_name": node.task_display_name,
-                "type": "task",
-                "parent_id": parent_id,
-                **_get_aggs_for_node(summary),
-            },
-            summary,
-        )
-        return
+    yield from _aggregate_grid_node_plan(_build_grid_node_plan(node, parent_node, group_dict), ti_details)
