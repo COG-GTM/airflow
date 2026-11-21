@@ -60,7 +60,9 @@ from airflow.api_fastapi.core_api.openapi.exceptions import create_openapi_http_
 from airflow.api_fastapi.core_api.security import requires_access_dag
 from airflow.api_fastapi.core_api.services.ui.grid import (
     GridNodeAgg,
-    _find_aggregates,
+    GridNodePlanEntry,
+    _aggregate_grid_node_plan,
+    _build_grid_node_plan,
     _get_aggs_for_node,
     _merge_node_dicts,
 )
@@ -405,6 +407,7 @@ def _build_ti_summaries(
     session: Session,
     *,
     dag_bag: DBDagBag,
+    node_plans: dict[Any, list[GridNodePlanEntry]] | None = None,
 ) -> dict[str, Any] | None:
     ti_details: dict[str, GridNodeAgg] = {}
     dag_version_id = None
@@ -424,17 +427,18 @@ def _build_ti_summaries(
     if not ti_details:
         return None
 
-    serdag = _get_serdag(dag_bag, dag_id, dag_version_id, session)
-    if TYPE_CHECKING:
-        assert serdag
+    if node_plans is None:
+        node_plans = {}
+    node_plan = node_plans.get(dag_version_id)
+    if node_plan is None:
+        serdag = _get_serdag(dag_bag, dag_id, dag_version_id, session)
+        if TYPE_CHECKING:
+            assert serdag
+        node_plan = node_plans[dag_version_id] = _build_grid_node_plan(serdag.task_group)
 
     def get_node_summaries() -> Iterable[dict[str, Any]]:
         yielded_task_ids: set[str] = set()
-        for node, _ in _find_aggregates(
-            node=serdag.task_group,
-            parent_node=None,
-            ti_details=ti_details,
-        ):
+        for node, _ in _aggregate_grid_node_plan(node_plan, ti_details):
             if node["type"] in {"task", "mapped_task"}:
                 yielded_task_ids.add(node["task_id"])
                 if node["type"] == "task":
@@ -521,6 +525,10 @@ def get_grid_ti_summaries_stream(
             .label("has_note")
         )
 
+        # The grid node plan depends only on the Dag version, so build it once per version
+        # instead of re-walking and re-sorting the task group tree for every run.
+        node_plans: dict[Any, list[GridNodePlanEntry]] = {}
+
         for run_id in run_ids or []:
             with create_session(scoped=False) as session:
                 tis = session.execute(
@@ -545,6 +553,7 @@ def get_grid_ti_summaries_stream(
                     tis,
                     session,
                     dag_bag=dag_bag,
+                    node_plans=node_plans,
                 )
             if summary is None:
                 continue
